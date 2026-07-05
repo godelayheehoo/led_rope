@@ -28,6 +28,17 @@ struct Pulse {
 const int MAX_PULSES = 8;
 Pulse pulses[MAX_PULSES];
 
+// NotePulse data structure representing a travelling note light pulse
+struct NotePulse {
+  float position;
+  uint8_t semitone; // 0 to 11
+  float brightness; // For stopped clock decay [0.0, 1.0]
+  bool active;      // True if the note pulse is currently rendering
+};
+
+// Note pulse management
+NotePulse notePulses[MAX_NOTE_PULSES];
+
 // Animation speed: a pulse launched on beat 1 reaches the end in one measure
 // (96 MIDI clocks)
 const float SPEED_PER_CLOCK = static_cast<float>(NUM_LEDS) / 96.0f;
@@ -75,6 +86,32 @@ void updatePulses() {
   }
 }
 
+// Spawn a new note pulse on the strip
+void spawnNotePulse(uint8_t note) {
+  uint8_t semitone = note % 12;
+  for (int i = 0; i < MAX_NOTE_PULSES; i++) {
+    if (!notePulses[i].active) {
+      notePulses[i].position = 0.0f;
+      notePulses[i].semitone = semitone;
+      notePulses[i].brightness = 1.0f;
+      notePulses[i].active = true;
+      break;
+    }
+  }
+}
+
+// Move active note pulses forward
+void updateNotePulses() {
+  for (int i = 0; i < MAX_NOTE_PULSES; i++) {
+    if (notePulses[i].active) {
+      notePulses[i].position += SPEED_PER_CLOCK;
+      if (notePulses[i].position >= NUM_LEDS) {
+        notePulses[i].active = false;
+      }
+    }
+  }
+}
+
 // Render pulses and flash overlays onto the strip
 void renderPulses() {
   // 1. Calculate the background flash color if any
@@ -89,7 +126,7 @@ void renderPulses() {
     leds[i] = baseColor;
   }
 
-  // 3. Render active pulses additively
+  // 3. Render active clock pulses additively
   for (int pIdx = 0; pIdx < MAX_PULSES; pIdx++) {
     if (!pulses[pIdx].active)
       continue;
@@ -140,41 +177,120 @@ void renderPulses() {
       }
     }
   }
+
+  // 4. Render active note pulses
+  static CRGB noteColors[NUM_LEDS];
+  memset(noteColors, 0, sizeof(noteColors));
+
+  for (int pIdx = 0; pIdx < MAX_NOTE_PULSES; pIdx++) {
+    if (!notePulses[pIdx].active)
+      continue;
+
+    float p = notePulses[pIdx].position;
+    int ledIdx = static_cast<int>(p + 0.5f);
+
+    if (ledIdx >= 0 && ledIdx < NUM_LEDS) {
+      uint8_t hue = (notePulses[pIdx].semitone * 256) / 12;
+      CRGB color = CHSV(hue, 255, 255);
+      
+      // Scale by current note pulse brightness (for decay when stopped)
+      color.nscale8(static_cast<uint8_t>(notePulses[pIdx].brightness * 255.0f));
+      // Scale by initial brightness fraction (1/3rd)
+      color.nscale8(NOTE_PULSE_BRIGHTNESS_SCALE);
+
+      noteColors[ledIdx] += color; // Additive combination for chords
+    }
+  }
+
+  // 5. Apply precedence: note pulses overwrite clock pulses
+  for (int i = 0; i < NUM_LEDS; i++) {
+    if (noteColors[i].r || noteColors[i].g || noteColors[i].b) {
+      leds[i] = noteColors[i];
+    }
+  }
 }
 
 // Process incoming MIDI bytes and drive playback and visual changes
 void handleMidiByte(uint8_t byte) {
-  if (byte == 0xF8) { // MIDI Timing Clock
-    lastClockTime = millis();
-    updatePulses();
+  // Real-time messages (0xF8 - 0xFF) - can be interleaved anywhere and do not disrupt status
+  if (byte >= 0xF8) {
+    if (byte == 0xF8) { // MIDI Timing Clock
+      lastClockTime = millis();
+      updatePulses();
+      updateNotePulses();
 
-    // Every 24 clocks is a quarter note beat
-    if (clockCount % 24 == 0) {
-      bool isDownbeat = (clockCount == 0);
-      spawnPulse(isDownbeat);
-    }
+      // Every 24 clocks is a quarter note beat
+      if (clockCount % 24 == 0) {
+        bool isDownbeat = (clockCount == 0);
+        spawnPulse(isDownbeat);
+      }
 
-    clockCount++;
-    if (clockCount >= 96) {
+      clockCount++;
+      if (clockCount >= 96) {
+        clockCount = 0;
+      }
+    } else if (byte == 0xFA) { // MIDI Start
       clockCount = 0;
-    }
-  } else if (byte == 0xFA) { // MIDI Start
-    clockCount = 0;
 
-    // Clear existing active pulses
-    for (int i = 0; i < MAX_PULSES; i++) {
-      pulses[i].active = false;
+      // Clear existing active pulses
+      for (int i = 0; i < MAX_PULSES; i++) {
+        pulses[i].active = false;
+      }
+      for (int i = 0; i < MAX_NOTE_PULSES; i++) {
+        notePulses[i].active = false;
+      }
+
+      // Trigger green flash overlay
+      flashColor = CRGB::Green;
+      flashIntensity = 1.0f;
+    } else if (byte == 0xFC) { // MIDI Stop
+      // Trigger red flash overlay
+      flashColor = CRGB::Red;
+      flashIntensity = 1.0f;
+    } else if (byte == 0xFB) { // MIDI Continue
+      // Resume overlay or state if needed
+    }
+    return;
+  }
+
+  static uint8_t runningStatus = 0;
+  static uint8_t dataBuffer[2];
+  static uint8_t dataCount = 0;
+  static uint8_t expectedDataBytes = 0;
+
+  // Status bytes (0x80 - 0xF7)
+  if (byte >= 0x80) {
+    runningStatus = byte;
+    dataCount = 0;
+    uint8_t highNibble = byte & 0xF0;
+    if (highNibble == 0xC0 || highNibble == 0xD0) {
+      expectedDataBytes = 1;
+    } else if (highNibble >= 0x80 && highNibble <= 0xEF) {
+      expectedDataBytes = 2;
+    } else {
+      expectedDataBytes = 0; // Ignore System Common message data bytes
+    }
+    return;
+  }
+
+  // Data bytes (0x00 - 0x7F)
+  if (runningStatus >= 0x80 && runningStatus <= 0xEF) {
+    if (dataCount < expectedDataBytes) {
+      dataBuffer[dataCount++] = byte;
     }
 
-    // Trigger green flash overlay
-    flashColor = CRGB::Green;
-    flashIntensity = 1.0f;
-  } else if (byte == 0xFC) { // MIDI Stop
-    // Trigger red flash overlay
-    flashColor = CRGB::Red;
-    flashIntensity = 1.0f;
-  } else if (byte == 0xFB) { // MIDI Continue
-    // Resume overlay or state if needed
+    if (dataCount == expectedDataBytes) {
+      uint8_t statusType = runningStatus & 0xF0;
+      if (statusType == 0x90) { // Note On
+        uint8_t note = dataBuffer[0];
+        uint8_t velocity = dataBuffer[1];
+        if (velocity > 0) {
+          spawnNotePulse(note);
+        }
+      }
+      // Reset count for subsequent messages using running status
+      dataCount = 0;
+    }
   }
 }
 
@@ -202,6 +318,9 @@ void setup() {
   // Clear all pulses initially
   for (int i = 0; i < MAX_PULSES; i++) {
     pulses[i].active = false;
+  }
+  for (int i = 0; i < MAX_NOTE_PULSES; i++) {
+    notePulses[i].active = false;
   }
 }
 
@@ -233,6 +352,14 @@ void loop() {
           pulses[i].brightness -= PULSE_DECAY_RATE_STOPPED;
           if (pulses[i].brightness <= 0.0f) {
             pulses[i].active = false;
+          }
+        }
+      }
+      for (int i = 0; i < MAX_NOTE_PULSES; i++) {
+        if (notePulses[i].active) {
+          notePulses[i].brightness -= NOTE_PULSE_DECAY_RATE_STOPPED;
+          if (notePulses[i].brightness <= 0.0f) {
+            notePulses[i].active = false;
           }
         }
       }
