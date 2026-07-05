@@ -1,0 +1,138 @@
+#include <Arduino.h>
+#include <Adafruit_NeoPixel.h>
+#include "constants.h"
+
+// Initialize the NeoPixel strip using constants from constants.h
+Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
+
+int manualCount = -1;  // -1 means automatic crawl mode
+int crawlIndex = 0;
+unsigned long lastCrawlTime = 0;
+const unsigned long crawlInterval = 300; // time in ms per LED during automatic crawl
+
+void printInstructions() {
+  Serial.println(F("\n=============================================="));
+  Serial.println(F("           LED COUNTING UTILITY               "));
+  Serial.println(F("=============================================="));
+  Serial.print(F("Configured to use "));
+  Serial.print(NUM_LEDS);
+  Serial.print(F(" LEDs on Pin "));
+  Serial.println(LED_PIN);
+  Serial.println();
+  Serial.println(F("MODES OF OPERATION:"));
+  Serial.println(F("1. Automatic Crawl (Active by default):"));
+  Serial.println(F("   The script will light up each LED one by one,"));
+  Serial.println(F("   printing its 1-based number and 0-based index."));
+  Serial.println(F("   Watch the rope: when the last LED lights up,"));
+  Serial.println(F("   check the Serial monitor for the last printed number."));
+  Serial.println();
+  Serial.println(F("2. Manual Mode (Interactive Verification):"));
+  Serial.println(F("   Type a number (e.g., 60) in the Serial Monitor and send it."));
+  Serial.println(F("   The script will light up exactly that many LEDs."));
+  Serial.println(F("   - LEDs 1 to (N-1) will be GREEN."));
+  Serial.println(F("   - The N-th LED (the last one) will be RED."));
+  Serial.println(F("   If the red LED is at the very end of your rope, N is your count!"));
+  Serial.println(F("   Send '0' or any letter to return to Automatic Crawl."));
+  Serial.println(F("==============================================\n"));
+}
+
+void setup() {
+  Serial.begin(9600);
+  while (!Serial) {
+    ; // Wait for serial port to connect (needed for Leonardo/Micro/some boards, safe on Nano)
+  }
+
+  strip.begin();
+  strip.show(); // Initialize all pixels to 'off'
+  
+  printInstructions();
+}
+
+void loop() {
+  // Check for Serial Input
+  if (Serial.available() > 0) {
+    // Read input until newline or timeout
+    String input = Serial.readStringUntil('\n');
+    input.trim();
+
+    if (input.length() > 0) {
+      // Check if it's a number
+      bool isNum = true;
+      for (unsigned int i = 0; i < input.length(); i++) {
+        if (!isDigit(input.charAt(i))) {
+          isNum = false;
+          break;
+        }
+      }
+
+      if (isNum) {
+        int val = input.toInt();
+        if (val > 0) {
+          if (val > NUM_LEDS) {
+            Serial.print(F("Warning: Input exceeds NUM_LEDS ("));
+            Serial.print(NUM_LEDS);
+            Serial.println(F("). Capping at NUM_LEDS."));
+            val = NUM_LEDS;
+          }
+          manualCount = val;
+          Serial.print(F("Switching to Manual Mode: Lighting up "));
+          Serial.print(val);
+          Serial.print(F(" LEDs. Last LED (Index "));
+          Serial.print(val - 1);
+          Serial.println(F(") should be RED, others GREEN."));
+
+          // Light up LEDs:
+          strip.clear();
+          for (int i = 0; i < val - 1; i++) {
+            strip.setPixelColor(i, strip.Color(0, 100, 0)); // Moderate Green
+          }
+          strip.setPixelColor(val - 1, strip.Color(150, 0, 0)); // Bright Red
+          strip.show();
+        } else {
+          // Input was 0
+          manualCount = -1;
+          Serial.println(F("Switching to Automatic Crawl Mode..."));
+          crawlIndex = 0;
+          strip.clear();
+          strip.show();
+        }
+      } else {
+        // Non-numeric input
+        manualCount = -1;
+        Serial.println(F("Non-numeric input received. Switching to Automatic Crawl Mode..."));
+        crawlIndex = 0;
+        strip.clear();
+        strip.show();
+      }
+    }
+  }
+
+  // Automatic Crawl Mode logic
+  if (manualCount == -1) {
+    unsigned long currentMillis = millis();
+    if (currentMillis - lastCrawlTime >= crawlInterval) {
+      lastCrawlTime = currentMillis;
+
+      // Clear previous LED
+      strip.clear();
+
+      // Light up current LED in blue/cyan
+      strip.setPixelColor(crawlIndex, strip.Color(0, 80, 150)); 
+      strip.show();
+
+      // Print status
+      Serial.print(F("Crawl: LED #"));
+      Serial.print(crawlIndex + 1);
+      Serial.print(F(" (Index "));
+      Serial.print(crawlIndex);
+      Serial.println(F(")"));
+
+      // Advance
+      crawlIndex++;
+      if (crawlIndex >= NUM_LEDS) {
+        crawlIndex = 0;
+        Serial.println(F("Crawl wrapped around to start."));
+      }
+    }
+  }
+}
