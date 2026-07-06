@@ -25,30 +25,24 @@ struct Pulse {
 };
 
 // Pulse management
-const int MAX_PULSES = 8;
 Pulse pulses[MAX_PULSES];
 
 // Animation speed: a pulse launched on beat 1 reaches the end in one measure
 // (96 MIDI clocks)
 const float SPEED_PER_CLOCK = static_cast<float>(NUM_LEDS) / 96.0f;
-const float TRAIL_DECAY = 3.0f; // Width/fade speed of the pulse trail (in LEDs)
 
 // Playback and timing state
 volatile uint32_t clockCount = 0;
 volatile unsigned long lastClockTime = 0;
-const unsigned long CLOCK_TIMEOUT = 500; // ms
 bool isPlaying = false;
+unsigned long lastStopFlashTime = 0;
 
 // Flash overlay state (Brief green pulse on Start, red pulse on Stop)
 float flashIntensity = 0.0f;
 CRGB flashColor = CRGB::Black;
-const float FLASH_DECAY_RATE = 0.05f; // Fades out in ~20 frames
-const float PULSE_DECAY_RATE_STOPPED =
-    0.03f; // Natural decay rate of active pulses when paused
 
 // Timing for the continuous rendering loop
 unsigned long lastFrameTime = 0;
-const unsigned long FRAME_INTERVAL = 16; // ~60 FPS (16ms per frame)
 
 // Spawn a new pulse on the strip
 void spawnPulse(bool isDownbeat) {
@@ -168,15 +162,19 @@ void handleMidiByte(uint8_t byte) {
       pulses[i].active = false;
     }
 
-    // Trigger green flash overlay
-    flashColor = CRGB::Green;
+    // Trigger play flash overlay
+    flashColor = LED_COLOR_PLAY_FLASH;
     flashIntensity = 1.0f;
     isPlaying = true;
   } else if (byte == 0xFC) { // MIDI Stop
     if (isPlaying) {
-      // Trigger red flash overlay
-      flashColor = CRGB::Red;
-      flashIntensity = 1.0f;
+      unsigned long now = millis();
+      if (now - lastStopFlashTime >= 1000) {
+        // Trigger stop flash overlay
+        flashColor = LED_COLOR_STOP_FLASH;
+        flashIntensity = 1.0f;
+        lastStopFlashTime = now;
+      }
       isPlaying = false;
     }
   } else if (byte == 0xFB) { // MIDI Continue
@@ -233,9 +231,11 @@ void loop() {
       }
     }
 
-    // If the clock has stopped (timeout), decay active pulses so they fade naturally
+    // If the clock has stopped (timeout), decay active pulses so they fade
+    // naturally
     bool isClockActive = (millis() - lastClockTime < CLOCK_TIMEOUT);
     if (!isClockActive) {
+      isPlaying = false;
       for (int i = 0; i < MAX_PULSES; i++) {
         if (pulses[i].active) {
           pulses[i].brightness -= PULSE_DECAY_RATE_STOPPED;
