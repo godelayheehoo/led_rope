@@ -27,17 +27,13 @@ struct Pulse {
 // Pulse management
 Pulse pulses[MAX_PULSES];
 
-// Animation speed: a pulse launched on beat 1 reaches the end in one measure
-// (96 MIDI clocks)
-const float SPEED_PER_CLOCK = static_cast<float>(NUM_LEDS) / 96.0f;
 
 // Playback and timing state
 volatile uint32_t clockCount = 0;
 volatile unsigned long lastClockTime = 0;
 bool isPlaying = false;
-unsigned long lastStopFlashTime = 0;
 
-// Flash overlay state (Brief green pulse on Start, red pulse on Stop)
+// Flash overlay state (Brief green pulse on Start)
 float flashIntensity = 0.0f;
 CRGB flashColor = CRGB::Black;
 
@@ -62,8 +58,8 @@ void spawnPulse(bool isDownbeat) {
 void updatePulses() {
   for (int i = 0; i < MAX_PULSES; i++) {
     if (pulses[i].active) {
-      pulses[i].position += SPEED_PER_CLOCK * pulses[i].direction;
-      if (pulses[i].position >= NUM_LEDS) {
+      pulses[i].position += static_cast<float>(LEDS_PER_PULSE) * pulses[i].direction;
+      if (pulses[i].position >= 96.0f * static_cast<float>(LEDS_PER_PULSE)) {
         pulses[i].active = false;
       }
     }
@@ -106,16 +102,19 @@ void renderPulses() {
     // Render pulse onto the strip using a sub-pixel profile:
     // Head has a linear fade in from +1 LED, trail has an exponential decay
     // behind
-    int startLED = static_cast<int>(p) - 15;
-    int endLED = static_cast<int>(p) + 2;
+    int activeStart = NUM_LEDS - 96 * LEDS_PER_PULSE;
+    float absP = p + static_cast<float>(activeStart);
 
-    if (startLED < 0)
-      startLED = 0;
+    int startLED = static_cast<int>(absP) - 15;
+    int endLED = static_cast<int>(absP) + 2;
+
+    if (startLED < activeStart)
+      startLED = activeStart;
     if (endLED > NUM_LEDS)
       endLED = NUM_LEDS;
 
     for (int i = startLED; i < endLED; i++) {
-      float dist = p - static_cast<float>(i);
+      float dist = absP - static_cast<float>(i);
       float factor = 0.0f;
 
       if (dist < -1.0f) {
@@ -144,6 +143,14 @@ void handleMidiByte(uint8_t byte) {
     lastClockTime = millis();
     updatePulses();
 
+    // Decay the flash overlay intensity per clock pulse
+    if (flashIntensity > 0.0f) {
+      flashIntensity -= FLASH_DECAY_RATE;
+      if (flashIntensity < 0.0f) {
+        flashIntensity = 0.0f;
+      }
+    }
+
     // Every 24 clocks is a quarter note beat
     if (clockCount % 24 == 0) {
       bool isDownbeat = (clockCount == 0);
@@ -154,6 +161,9 @@ void handleMidiByte(uint8_t byte) {
     if (clockCount >= 96) {
       clockCount = 0;
     }
+
+    renderPulses();
+    FastLED.show();
   } else if (byte == 0xFA) { // MIDI Start
     clockCount = 0;
 
@@ -166,17 +176,11 @@ void handleMidiByte(uint8_t byte) {
     flashColor = LED_COLOR_PLAY_FLASH;
     flashIntensity = 1.0f;
     isPlaying = true;
+
+    renderPulses();
+    FastLED.show();
   } else if (byte == 0xFC) { // MIDI Stop
-    if (isPlaying) {
-      unsigned long now = millis();
-      if (now - lastStopFlashTime >= 1000) {
-        // Trigger stop flash overlay
-        flashColor = LED_COLOR_STOP_FLASH;
-        flashIntensity = 1.0f;
-        lastStopFlashTime = now;
-      }
-      isPlaying = false;
-    }
+    isPlaying = false;
   } else if (byte == 0xFB) { // MIDI Continue
     // Resume overlay or state if needed
     isPlaying = true;
@@ -223,17 +227,25 @@ void loop() {
   if (currentMillis - lastFrameTime >= FRAME_INTERVAL) {
     lastFrameTime = currentMillis;
 
+    bool isClockActive = (millis() - lastClockTime < CLOCK_TIMEOUT);
+
+    // If active playback is happening, bypass the 60 FPS update (driven by 0xF8 timing clocks)
+    if (isPlaying && isClockActive) {
+      return;
+    }
+
+    // Otherwise, decay the play flash and pulses at 60 FPS (stop/timeout or startup play flash)
+    bool needsRender = false;
+
     // Decay the flash overlay intensity
     if (flashIntensity > 0.0f) {
       flashIntensity -= FLASH_DECAY_RATE;
       if (flashIntensity < 0.0f) {
         flashIntensity = 0.0f;
       }
+      needsRender = true;
     }
 
-    // If the clock has stopped (timeout), decay active pulses so they fade
-    // naturally
-    bool isClockActive = (millis() - lastClockTime < CLOCK_TIMEOUT);
     if (!isClockActive) {
       isPlaying = false;
       for (int i = 0; i < MAX_PULSES; i++) {
@@ -242,12 +254,14 @@ void loop() {
           if (pulses[i].brightness <= 0.0f) {
             pulses[i].active = false;
           }
+          needsRender = true;
         }
       }
     }
 
-    // Render pulses and update the LED strip
-    renderPulses();
-    FastLED.show();
+    if (needsRender) {
+      renderPulses();
+      FastLED.show();
+    }
   }
 }
