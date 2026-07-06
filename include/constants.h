@@ -11,7 +11,7 @@ const int NUM_LEDS = 100;
 const int LED_PIN = 6;
 
 // MIDI Configuration
-const int MIDI_RX_PIN = 2;
+const int MIDI_RX_PIN = 3;
 
 // LED Color Configuration
 const CRGB LED_COLOR_STANDARD = CRGB(0, 150, 255);
