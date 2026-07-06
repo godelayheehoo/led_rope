@@ -37,6 +37,7 @@ const float TRAIL_DECAY = 3.0f; // Width/fade speed of the pulse trail (in LEDs)
 volatile uint32_t clockCount = 0;
 volatile unsigned long lastClockTime = 0;
 const unsigned long CLOCK_TIMEOUT = 500; // ms
+bool isPlaying = false;
 
 // Flash overlay state (Brief green pulse on Start, red pulse on Stop)
 float flashIntensity = 0.0f;
@@ -145,6 +146,7 @@ void renderPulses() {
 // Process incoming MIDI bytes and drive playback and visual changes
 void handleMidiByte(uint8_t byte) {
   if (byte == 0xF8) { // MIDI Timing Clock
+    isPlaying = true;
     lastClockTime = millis();
     updatePulses();
 
@@ -169,12 +171,17 @@ void handleMidiByte(uint8_t byte) {
     // Trigger green flash overlay
     flashColor = CRGB::Green;
     flashIntensity = 1.0f;
+    isPlaying = true;
   } else if (byte == 0xFC) { // MIDI Stop
-    // Trigger red flash overlay
-    flashColor = CRGB::Red;
-    flashIntensity = 1.0f;
+    if (isPlaying) {
+      // Trigger red flash overlay
+      flashColor = CRGB::Red;
+      flashIntensity = 1.0f;
+      isPlaying = false;
+    }
   } else if (byte == 0xFB) { // MIDI Continue
     // Resume overlay or state if needed
+    isPlaying = true;
   }
 }
 
@@ -198,6 +205,7 @@ void setup() {
 
   // Initialize the MIDI serial input
   midiSerial.begin(31250);
+  pinMode(MIDI_RX_PIN, INPUT_PULLUP);
 
   // Clear all pulses initially
   for (int i = 0; i < MAX_PULSES; i++) {
